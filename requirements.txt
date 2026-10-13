@@ -1,0 +1,10 @@
+# Chatbot (notebook, utils.py, flask_app.py)
+anthropic
+weaviate-client
+sentence-transformers
+flask
+tqdm
+
+# Scraper (extract_from_site.py)
+requests
+beautifulsoup4

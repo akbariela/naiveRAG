@@ -1,6 +1,21 @@
-.models/
+# Python
+__pycache__/
+*.pyc
 .venv/
 venv/
-__pycache__/
+
+# Jupyter
 .ipynb_checkpoints/
+
+# Downloaded embedding model weights (~2.3 GB, re-downloaded automatically)
+.models/
+
+# Embedded Weaviate database (rebuilt from faq_qa_pairs.csv)
+chatbot/
+
+# Secrets
 .env
+
+# macOS metadata
+.DS_Store
+._*

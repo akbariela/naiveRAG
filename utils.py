@@ -1,578 +1,115 @@
-import json
-import requests
-from typing import Union, List, Dict
-import os
-from contextlib import redirect_stdout, redirect_stderr
-import logging
-import httpx
-from openai import OpenAI, DefaultHttpxClient
-from together import Together
-import json
-import requests
-from typing import Union, List, Dict, Any
-import os
-from contextlib import redirect_stdout, redirect_stderr
-import logging
-import httpx
-from openai import OpenAI, DefaultHttpxClient
+"""Shared helpers for the Sandogh FAQ chatbot.
 
+This module provides two things:
+1. Text embeddings (used by the Flask server that Weaviate calls to vectorize text).
+2. A thin wrapper around the Claude API (used by the notebook to generate answers).
+"""
+
+import os
+import threading
+from typing import Dict, List, Optional, Union
+
+import anthropic
 from sentence_transformers import SentenceTransformer
 
-# Load a pretrained model from Hugging Face
-model = SentenceTransformer("BAAI/bge-base-en-v1.5", cache_folder = ".models")
+# ------------------------------------------------------------
+# Embeddings
+# ------------------------------------------------------------
+# The FAQ data is Persian, so a multilingual model is required for useful
+# retrieval (BAAI/bge-base-en-v1.5 is English-only). Override with the
+# EMBEDDING_MODEL environment variable if needed.
+# NOTE: if you change the model after the Weaviate collection was built, delete
+# the ./chatbot folder so the data is re-embedded (vector sizes must match).
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
 
-# Custom transport to bypass SSL verification
-transport = httpx.HTTPTransport(local_address="0.0.0.0", verify=False)
+# Store downloaded model weights next to this file (not in whatever directory
+# the notebook happens to be started from), so they are downloaded only once.
+_MODEL_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".models")
 
-def get_proxy_url():
+# Loaded once at import time so the first Weaviate request doesn't time out
+# while the model is still loading.
+_embedding_model = SentenceTransformer(EMBEDDING_MODEL, cache_folder=_MODEL_CACHE_DIR)
+
+# Flask serves requests on several threads, and Weaviate sends batches
+# concurrently. Hugging Face fast tokenizers are not safe to call from several
+# threads at once ("Already borrowed" errors), so encoding is serialized.
+_embedding_lock = threading.Lock()
+
+
+def generate_embedding(text: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:
+    """Embed a string (returns one vector) or a list of strings (returns a list of vectors).
+
+    Vectors are L2-normalized, so cosine similarity equals the dot product.
     """
-    Get the proxy URL from environment variable or fall back to Together.ai endpoint.
-    Uses TOGETHER_BASE_URL environment variable set in Dockerfile.
-    Defaults to https://api.together.xyz/ if not set.
+    with _embedding_lock:
+        return _embedding_model.encode(text, normalize_embeddings=True).tolist()
+
+
+# ------------------------------------------------------------
+# LLM (Claude)
+# ------------------------------------------------------------
+CLAUDE_MODEL = "claude-opus-5-5"
+
+# Reads ANTHROPIC_API_KEY (or another configured Anthropic credential, such as an
+# `ant auth login` profile) from the environment. The SDK retries rate-limit and
+# server errors automatically (2 retries by default).
+_client = anthropic.Anthropic()
+
+
+def generate_with_multiple_input(
+    messages: List[Dict],
+    system: Optional[str] = None,
+    max_tokens: int = 16000,
+    effort: str = "medium",
+    model: str = CLAUDE_MODEL,
+) -> Dict[str, str]:
+    """Send a conversation to Claude and return {"role": "assistant", "content": <text>}.
+
+    Args:
+        messages: Conversation history, e.g. [{"role": "user", "content": "..."}].
+        system: Optional system prompt (instructions for the assistant).
+        max_tokens: Upper limit on the length of the reply.
+        effort: How much reasoning Claude spends: "low", "medium", "high", "xhigh" or "max".
+            Thinking is always on for this model; effort is the control for its depth.
+        model: Claude model ID.
     """
-    return os.environ.get('TOGETHER_BASE_URL', 'https://api.together.xyz/')
-
-def get_proxy_headers():
-    """
-    Get the appropriate headers for API calls based on the platform.
-    Returns Authorization header with Together API key if available.
-    """
-    return {"Authorization": os.environ.get("TOGETHER_API_KEY", "")}
-
-def get_together_key():
-    """
-    Get the Together API key from environment variables.
-    """
-    return os.environ.get("TOGETHER_API_KEY", "")
-
-# Create a DefaultHttpxClient instance with the custom transport
-http_client = DefaultHttpxClient(transport=transport)
-
-def print_object_properties(obj: Union[dict, list]) -> None:
-    t = ''
-    if isinstance(obj, dict):
-        keys = list(obj.keys())
-        keys.sort()
-        for x in keys:
-            y = obj[x]
-            if x == 'article_content':
-                t += f'{x}: {y[:100]}...(truncated)\n'
-            elif x == 'main_vector':
-                t+= f'{x}: {y[:30]}...(truncated)\n'
-            elif x == 'chunk':
-                t+= f'{x}: {y[:100]}...(truncated)\n'
-
-            else:
-                t+= f'{x}: {y}\n'
-    else:
-        for l in obj:
-            print_object_properties(l)
-        
-    print(t)
-    
-    
-
-# Define utility functions and classes
-def generate_embedding(prompt: str): #model: str = "BAAI/bge-base-en-v1.5", together_api_key = None, **kwargs):
-    return model.encode(prompt).tolist()
-    payload = {
+    request = {
         "model": model,
-        "input": prompt,
-        **kwargs
+        "max_tokens": max_tokens,
+        "messages": messages,
+        "output_config": {"effort": effort},
+        # If a safety classifier declines the request, the API retries it on
+        # Anthropic's recommended fallback model instead of returning a refusal.
+        "betas": ["server-side-fallback-2026-07-01"],
+        "fallbacks": "default",
     }
-    if (not together_api_key) and ('TOGETHER_API_KEY' not in os.environ):
-        client = OpenAI(
-    api_key = '', # Set any as dlai proxy does not use it. Set the together api key if using the together endpoint
-    base_url="http://proxy.dlai.link/coursera_proxy/together/", # If using together endpoint, add it here https://api.together.xyz/
-   http_client=http_client, # ssl bypass to make it work via proxy calls, remove it if running with together.ai endpoint 
-)
-        try:
-            json_dict = client.embeddings.create(**payload).model_dump()
-            return json_dict['data'][0]['embedding']
-        except Exception as e:
-            raise Exception(f"Failed to get correct output from LLM call.\nException: {e}")
-    else:
-        if together_api_key is None:
-            together_api_key = os.environ['TOGETHER_API_KEY']
-        client = Together(api_key=together_api_key)
-        try:
-            json_dict = client.embeddings.create(**payload).model_dump()
-            return json_dict['data'][0]['embedding']
-        except Exception as e:
-            raise Exception(f"Failed to get correct output from LLM call.\nException: {e}")
+    if system:
+        request["system"] = system
 
-import subprocess
-from contextlib import contextmanager
-import os
+    response = _client.beta.messages.create(**request)
 
-from typing import Iterable, Dict, Any
-import time
+    # A refusal means every model in the fallback chain declined.
+    if response.stop_reason == "refusal":
+        raise RuntimeError(f"Claude declined the request: {response.stop_details}")
 
-@contextmanager
-def suppress_subprocess_output():
-    """
-    Context manager that suppresses the standard output and error 
-    of any subprocess.Popen calls within this context.
-    """
-    # Store the original Popen
-    original_popen = subprocess.Popen
+    # The response can contain several block types (thinking, fallback markers, text);
+    # only the text blocks make up the visible answer.
+    text = "".join(block.text for block in response.content if block.type == "text")
+    return {"role": "assistant", "content": text}
 
-    def patched_popen(*args, **kwargs):
-        # Redirect the stdout and stderr to subprocess.DEVNULL
-        kwargs['stdout'] = subprocess.DEVNULL
-        kwargs['stderr'] = subprocess.DEVNULL
-        return original_popen(*args, **kwargs)
-
-    try:
-        # Apply the patch by replacing subprocess.Popen with patched_popen
-        subprocess.Popen = patched_popen
-        # Yield control back to the context
-        yield
-    finally:
-        # Ensure that the original Popen method is restored
-        subprocess.Popen = original_popen
-
-# Custom transport to bypass SSL verification
-transport = httpx.HTTPTransport(local_address="0.0.0.0", verify=False)
-
-# Create a DefaultHttpxClient instance with the custom transport
-http_client = DefaultHttpxClient(transport=transport)
-
-
-def print_object_properties(obj: Union[dict, list]) -> None:
-    t = ''
-    if isinstance(obj, dict):
-        keys = list(obj.keys())
-        keys.sort()
-        for x in keys:
-            y = obj[x]
-            if x == 'article_content':
-                t += f'{x}: {y[:100]}...(truncated)\n'
-            elif x == 'main_vector':
-                t+= f'{x}: {y[:30]}...(truncated)\n'
-            elif x == 'chunk':
-                t+= f'{x}: {y[:100]}...(truncated)\n'
-
-            else:
-                t+= f'{x}: {y}\n'
-    else:
-        for l in obj:
-            print_object_properties(l)
-        
-    print(t)
-    
-    
-
-# Define utility functions and classes
 
 def generate_with_single_input(
     prompt: str,
-    role: str = "user",
-    top_p: float = None,
-    temperature: float = None,
-    max_tokens: int = 500,
-    model: str = "qwen3.5:9b",
-    **kwargs
-):
-
-    payload = {
-        "model": model,
-        "messages": [
-            {
-                "role": role,
-                "content": prompt
-            }
-        ],
-        "stream": False,
-        "think": False,
-    }
-
-    if temperature is not None:
-        payload.setdefault("options", {})
-        payload["options"]["temperature"] = temperature
-
-    if top_p is not None:
-        payload.setdefault("options", {})
-        payload["options"]["top_p"] = top_p
-
-    if max_tokens is not None:
-        payload.setdefault("options", {})
-        payload["options"]["num_predict"] = max_tokens
-
-    url = "http://localhost:11434/api/chat"
-
-    response = requests.post(
-        url,
-        json=payload
+    system: Optional[str] = None,
+    max_tokens: int = 16000,
+    effort: str = "medium",
+    model: str = CLAUDE_MODEL,
+) -> Dict[str, str]:
+    """Send a single user prompt to Claude (convenience wrapper around the function above)."""
+    return generate_with_multiple_input(
+        [{"role": "user", "content": prompt}],
+        system=system,
+        max_tokens=max_tokens,
+        effort=effort,
+        model=model,
     )
-
-    if not response.ok:
-        raise Exception(
-            f"Error while calling Ollama: {response.text}"
-        )
-
-    try:
-        json_dict = response.json()
-    except Exception as e:
-        raise Exception(
-            f"Failed to parse Ollama response.\n"
-            f"Exception: {e}\n"
-            f"Response: {response.text}"
-        )
-
-    try:
-        message = json_dict["message"]
-
-        return {
-            "role": message["role"],
-            "content": message["content"]
-        }
-
-    except Exception as e:
-        raise Exception(
-            f"Failed to get output from Ollama.\n"
-            f"Error: {e}\n"
-            f"Response: {json_dict}"
-        )
-
-
-
-# def generate_with_single_input(
-#     prompt: str,
-#     role: str = "user",
-#     top_p: float = None,
-#     temperature: float = None,
-#     max_tokens: int = 500,
-#     model: str = "Qwen/Qwen3.5-9B",
-#     together_api_key=None,
-#     **kwargs
-# ):
-#     payload = {"model": model,"messages": [{"role": role,"content": prompt}],"max_tokens": max_tokens,"reasoning": {"enabled": False},**kwargs}
-
-#     if temperature is not None:
-#         payload["temperature"] = temperature
-
-#     if top_p is not None:
-#         payload["top_p"] = top_p
-
-#     # Use the explicitly provided key first.
-#     # If it is not provided, try the environment variable.
-#     together_api_key = together_api_key or os.getenv("TOGETHER_API_KEY")
-
-#     if together_api_key:
-#         # Call Together API directly
-#         client = Together(api_key=together_api_key)
-#         json_dict = client.chat.completions.create(**payload).model_dump()
-
-#     else:
-#         # Use the proxy when no Together API key is available
-#         url = os.path.join(get_proxy_url(),"v1/chat/completions")
-#         response = requests.post(url,json=payload,verify=False)
-
-#         if not response.ok:
-#             raise Exception(
-#                 f"Error while calling LLM: {response.text}"
-#             )
-
-#         try:
-#             json_dict = response.json()
-#         except Exception as e:
-#             raise Exception(
-#                 f"Failed to get correct output from LLM call.\n"
-#                 f"Exception: {e}\n"
-#                 f"Response: {response.text}"
-#             )
-
-#     try:
-#         message = json_dict["choices"][-1]["message"]
-#         output_dict = {"role": message["role"],"content": message["content"]}
-
-#     except Exception as e:
-#         raise Exception(
-#             f"Failed to get correct output dict. "
-#             f"Please try again. Error: {e}")
-#     return output_dict
-
-
-def generate_with_multiple_input(messages: List[Dict],
-                               top_p: float = None,
-                               temperature: float = None,
-                               max_tokens: int = 500,
-                               model: str ="Qwen/Qwen3.5-9B",
-                                together_api_key = None,
-                                **kwargs):
-    # Remove None parameters for Together API
-    if top_p is None:
-        payload_top_p = None
-    else:
-        payload_top_p = top_p
-    if temperature is None:
-        payload_temperature = None
-    else:
-        payload_temperature = temperature
-
-    payload = {
-        "model": model,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "reasoning": {"enabled": False},
-        **kwargs
-    }
-    # Only add temperature and top_p if they're not None
-    if payload_temperature is not None:
-        payload["temperature"] = payload_temperature
-    if payload_top_p is not None:
-        payload["top_p"] = payload_top_p
-
-    if (not together_api_key) and ('TOGETHER_API_KEY' not in os.environ):
-        url = os.path.join(get_proxy_url(), 'v1/chat/completions')
-        response = requests.post(url, json = payload, verify=False)
-        if not response.ok:
-            raise Exception(f"Error while calling LLM: {response.text}")
-        try:
-            json_dict = json.loads(response.text)
-        except Exception as e:
-            raise Exception(f"Failed to get correct output from LLM call.\nException: {e}\nResponse: {response.text}")
-    else:
-        if together_api_key is None:
-            together_api_key = os.environ['TOGETHER_API_KEY']
-        client = Together(api_key =  together_api_key)
-        json_dict = client.chat.completions.create(**payload).model_dump()
-        json_dict['choices'][-1]['message']['role'] = json_dict['choices'][-1]['message']['role'].name.lower()
-    try:
-        output_dict = {'role': json_dict['choices'][-1]['message']['role'], 'content': json_dict['choices'][-1]['message']['content']}
-    except Exception as e:
-        raise Exception(f"Failed to get correct output dict. Please try again. Error: {e}")
-    return output_dict
-
-
-
-
-def print_properties(item):
-    print(
-        json.dumps(
-            item.properties,
-            indent=2, sort_keys=True, default=str
-        )
-    )
-
-
-import ipywidgets as widgets
-from IPython.display import display, Markdown
-
-def display_widget(llm_call_func, semantic_search_retrieve, bm25_retrieve, hybrid_retrieve, semantic_search_with_reranking):
-    def on_button_click(b):
-        query = query_input.value
-        top_k = slider.value
-        rerank_property = rerank_property_dropdown.value
-        # Clear existing outputs
-        for output in [output1, output2, output3, output4, output5]:
-            output.clear_output()
-        status_output.clear_output()
-        # Display "Generating..." message
-        status_output.append_stdout("Generating...\n")
-        # Update outputs one by one
-        retrievals = [
-            (output1, llm_call_func, query, semantic_search_retrieve, True),
-            (output4, llm_call_func, query, semantic_search_with_reranking, True, True, rerank_property),
-            (output2, llm_call_func, query, bm25_retrieve, True),
-            (output3, llm_call_func, query, hybrid_retrieve, True),
-            (output5, llm_call_func, query, None, False)  # Without RAG
-        ]
-        for output, func, query, retriever, use_rag, *extra_info in retrievals:
-            use_rerank = extra_info[0] if len(extra_info) > 0 else False
-            if use_rerank:
-                rr_property = extra_info[1]
-            else:
-                rr_property = None
-            response = func(query=query, top_k=top_k, use_rag=use_rag, retrieve_function=retriever, use_rerank=use_rerank, rerank_property=rr_property)
-            with output:
-                display(Markdown(response))
-        # Clear "Generating..." message
-        status_output.clear_output()
-    
-    query_input = widgets.Text(
-        description='',
-        value="Tell me about United States and Brazil's relationship over the course of 2024. Provide links for the resources you use in the answer.",
-        placeholder='Type your query here',
-        layout=widgets.Layout(width='70%')  # Adjusted width to make room for label
-    )
-    
-    query_label = widgets.Label(value="Query:", layout=widgets.Layout(width='10%', align='center'))
-    query_box = widgets.HBox([query_label, query_input], layout=widgets.Layout(align_items='center'))  # Positioned side by side
-
-    slider = widgets.IntSlider(
-        value=5,
-        min=1,
-        max=20,
-        step=1,
-        description='Top K:',
-        style={'description_width': 'initial'}
-    )
-    
-    rerank_property_dropdown = widgets.Dropdown(
-        options=['title', 'chunk'],
-        value='title',
-        description='Rerank Property:',
-        style={'description_width': 'initial'}
-    )
-    
-    output_style = {'border': '1px solid #ccc', 'width': '100%'}
-    output1 = widgets.Output(layout=output_style)
-    output2 = widgets.Output(layout=output_style)
-    output3 = widgets.Output(layout=output_style)
-    output4 = widgets.Output(layout=output_style)
-    output5 = widgets.Output(layout=output_style)
-    status_output = widgets.Output()
-    
-    submit_button = widgets.Button(
-        description="Get Responses",
-        style={'button_color': '#eee', 'font_color': 'black'}
-    )
-    submit_button.on_click(on_button_click)
-    
-    label1 = widgets.Label(value="Semantic Search")
-    label2 = widgets.Label(value="BM25 Search")
-    label3 = widgets.Label(value="Hybrid Search")
-    label4 = widgets.Label(value="Semantic Search with Reranking")
-    label5 = widgets.Label(value="Without RAG")
-    
-    display(widgets.HTML("""
-    <style>
-        .custom-output {
-            background-color: #f9f9f9;
-            color: black;
-            border-radius: 5px;
-            border: 1px solid #ccc;
-        }
-        .widget-text, .widget-button {
-            background-color: #f0f0f0 !important;
-            color: black !important;
-            border: 1px solid #ddd !important;
-        }
-        .widget-output {
-            background-color: #f9f9f9 !important;
-            color: black !important;
-        }
-        input[type="text"] {
-            background-color: #f0f0f0 !important;
-            color: black !important;
-            border: 1px solid #ddd !important;
-        }
-    </style>
-    """))
-    
-    display(query_box, slider, rerank_property_dropdown, submit_button, status_output)
-    
-    # Create individual vertical containers for each label and output
-    vbox1 = widgets.VBox([label1, output1], layout={'width': '30%'})
-    vbox2 = widgets.VBox([label2, output2], layout={'width': '30%'})
-    vbox3 = widgets.VBox([label3, output3], layout={'width': '30%'})
-    vbox4 = widgets.VBox([label4, output4], layout={'width': '30%'})
-    vbox5 = widgets.VBox([label5, output5], layout={'width': '30%'})
-    
-    # HBoxes to arrange VBoxes in rows
-    hbox_outputs1 = widgets.HBox([vbox1, vbox4, vbox2], layout={'justify_content': 'space-between'})
-    hbox_outputs2 = widgets.HBox([vbox3, vbox5], layout={'justify_content': 'space-between'})
-    
-    def style_outputs(*outputs):
-        for output in outputs:
-            output.layout.margin = '5px'
-            output.layout.height = '300px'
-            output.layout.padding = '10px'
-            output.layout.overflow = 'auto'
-            output.add_class("custom-output")
-            
-    style_outputs(output1, output2, output3, output4, output5)
-    
-    # Display rows with outputs
-    display(hbox_outputs1)
-    display(hbox_outputs2)
-
-def kill_processes_on_ports(
-    ports: List[int],
-    *,
-    only_listening: bool = True,
-    include_udp: bool = True,
-    force: bool = True,
-    timeout: float = 5.0
-) -> Dict[str, Any]:
-    
-    target_ports = {int(p) for p in ports}
-    results = {
-        'pids_targeted': [],
-        'terminated': [],
-        'killed': [],
-        'errors': [],
-        'ports_with_no_match': []
-    }
-
-    pids = set()
-    matched_ports = set()
-
-    # به جای psutil.net_connections، پردازش‌ها را تک‌تک پیمایش می‌کنیم
-    for proc in psutil.process_iter(['pid', 'name']):
-        try:
-            conns = proc.net_connections(kind='inet')
-            for c in conns:
-                if not c.laddr:
-                    continue
-                port = c.laddr.port
-                if port not in target_ports:
-                    continue
-
-                if c.type == socket.SOCK_STREAM:
-                    if only_listening and c.status != psutil.CONN_LISTEN:
-                        continue
-                elif c.type == socket.SOCK_DGRAM:
-                    if not include_udp:
-                        continue
-
-                pids.add(proc.info['pid'])
-                matched_ports.add(port)
-        except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
-            # پردازش‌هایی که سیستم‌عامل اجازه دسترسی نمی‌دهد را نادیده می‌گیریم
-            continue
-
-    results['pids_targeted'] = sorted(pids)
-    results['ports_with_no_match'] = sorted(target_ports - matched_ports)
-
-    procs = []
-    for pid in list(pids):
-        try:
-            p = psutil.Process(pid)
-            if not p.is_running():
-                continue
-            p.terminate()
-            procs.append(p)
-        except (psutil.NoSuchProcess, psutil.ZombieProcess):
-            continue
-        except psutil.AccessDenied as e:
-            results['errors'].append({'pid': pid, 'error': f'Access denied: {e}'})
-
-    gone, alive = psutil.wait_procs(procs, timeout=timeout)
-    for p in gone:
-        try:
-            results['terminated'].append({'pid': p.pid, 'name': p.name()})
-        except Exception:
-            results['terminated'].append({'pid': p.pid, 'name': '?'})
-
-    if alive and force:
-        for p in alive:
-            try:
-                p.kill()
-            except (psutil.NoSuchProcess, psutil.ZombieProcess):
-                continue
-            except psutil.AccessDenied as e:
-                results['errors'].append({'pid': p.pid, 'error': f'Access denied on kill: {e}'})
-
-        gone2, alive2 = psutil.wait_procs(alive, timeout=timeout)
-        for p in gone2:
-            try:
-                results['killed'].append({'pid': p.pid, 'name': p.name()})
-            except Exception:
-                results['killed'].append({'pid': p.pid, 'name': '?'})
-        for p in alive2:
-            results['errors'].append({'pid': p.pid, 'error': 'still alive after kill()'})
-
-    return results
