@@ -3,6 +3,11 @@
 All notable changes to the Sandogh FAQ chatbot are recorded here.
 `extract_from_site.py` and `faq_qa_pairs.csv` were not changed in any of these versions.
 
+## [Unreleased]
+
+### Added
+- `README.md`: setup guide. It lists Python 3.10 to 3.14 as supported (PyTorch has no Python 3.15 release yet), installs into a virtual environment, and warns against the placeholder `weaviate` package (the real client is `weaviate-client`).
+
 ## [2.1.0] - 2026-10-13
 
 Review pass on top of 2.0.0, plus explanatory comments in every file.
