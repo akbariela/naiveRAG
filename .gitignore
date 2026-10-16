@@ -7,10 +7,12 @@ venv/
 # Jupyter
 .ipynb_checkpoints/
 
-# Downloaded embedding model weights (~2.3 GB, re-downloaded automatically)
+# Downloaded embedding model weights (several GB, re-downloaded automatically)
 .models/
 
-# Embedded Weaviate database (rebuilt from faq_qa_pairs.csv)
+# Embedded Weaviate database (rebuilt from data/faq_qa_pairs.csv)
+weaviate_data/
+# Old database folder (replaced by weaviate_data/). Safe to delete once the notebook is stopped.
 chatbot/
 
 # Secrets

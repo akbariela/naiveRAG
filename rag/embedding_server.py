@@ -5,7 +5,7 @@ text to an HTTP "inference API" and stores the vector that comes back. This modu
 is that API: it wraps `utils.generate_embedding` in a tiny Flask app.
 
 Importing this module starts the server in a background thread and waits until it
-answers, so the notebook can use it right after `import flask_app`.
+answers, so the notebook can use it right after `from rag import embedding_server`.
 """
 
 import logging
@@ -15,7 +15,7 @@ import time
 
 from flask import Flask, jsonify, request
 
-from utils import generate_embedding
+from .utils import generate_embedding
 
 app = Flask(__name__)
 

@@ -1,10 +1,10 @@
-# Chatbot (notebook, utils.py, flask_app.py)
-anthropic
+# Chatbot (main_project.ipynb and the rag/ package)
 weaviate-client
 sentence-transformers
 flask
 tqdm
-
-# Scraper (extract_from_site.py)
 requests
+python-dotenv
+
+# Scraper (scripts/extract_from_site.py)
 beautifulsoup4

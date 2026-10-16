@@ -1,12 +1,34 @@
 # Changelog
 
 All notable changes to the Sandogh FAQ chatbot are recorded here.
-`extract_from_site.py` and `faq_qa_pairs.csv` were not changed in any of these versions.
+The FAQ data (`faq_qa_pairs.csv`) has not changed in any of these versions.
 
 ## [Unreleased]
 
+### Changed: project structure
+- Files are organized into folders: `rag/` (code imported by the notebook), `data/` (the FAQ CSV) and `scripts/` (the scraper). The notebook stays at the root.
+  - `utils.py` → `rag/utils.py`; `flask_app.py` → `rag/embedding_server.py`; `faq_qa_pairs.csv` → `data/faq_qa_pairs.csv`; `extract_from_site.py` → `scripts/extract_from_site.py`.
+  - The notebook imports `from rag import embedding_server` and `from rag.utils import ...`, and reads `data/faq_qa_pairs.csv`.
+  - `rag/utils.py` finds `.env` and `.models/` in the project root, so they stay where they were and the model is not downloaded again.
+  - The Weaviate database folder is renamed from `chatbot/` to `weaviate_data/` (git-ignored). The database is rebuilt once on the next run.
+  - The scraper writes to `data/qa_pairs.csv`, from any working directory. Its scraping logic is unchanged.
+- Removed old leftovers: `Untitled.ipynb` (an early scratch notebook) and `chatbot_project/` (the v1.0 database). Both are still in git history.
+
 ### Added
-- `README.md`: setup guide. It lists Python 3.10 to 3.14 as supported (PyTorch has no Python 3.15 release yet), installs into a virtual environment, and warns against the placeholder `weaviate` package (the real client is `weaviate-client`).
+- `README.md`: setup guide and a troubleshooting table (kernel restart, missing key, rate limits, busy ports, Windows). It states that macOS or Linux is required (embedded Weaviate does not run on Windows; use WSL), lists Python 3.10 to 3.14 as supported (PyTorch has no Python 3.15 release yet), installs into a virtual environment, and warns against the placeholder `weaviate` package (the real client is `weaviate-client`).
+- **Persian normalization:** `normalize_persian()` in `utils.py` unifies Arabic and Persian letters (ي/ى→ی, ك→ک), Persian/Arabic digits (→ Latin), the characters the scraped FAQ uses instead of a half-space (`¬`, soft hyphen, RLM/LRM → ZWNJ), and removes diacritics and tatweel. It is applied to every chunk and to every question.
+- `.env.example`: template for the `.env` file that holds `OPENROUTER_API_KEY` (and optionally `LLM_MODEL`). `utils.py` loads `.env` with `python-dotenv`.
+
+### Changed
+- **Hybrid search:** `retrieve()` uses `collection.query.hybrid` (vector + BM25 keyword search on `chunk`, `alpha=0.5`) instead of `near_text`.
+- The collection is now `sandogh_faq_v2`, so the normalized chunks are built fresh instead of mixing with the old ones in `./chatbot`.
+- **LLM switched from Claude to a free OpenRouter model** (`google/gemma-4-31b-it:free` by default, overridable with `LLM_MODEL`), so no paid API key is needed. `utils.py` now calls OpenRouter's OpenAI-compatible endpoint with `requests`. `generate_with_single_input` / `generate_with_multiple_input` return the same `{"role", "content"}` dict as before; the `effort` parameter was removed and the default `max_tokens` is now 2000.
+- The API key is read when a request is made, not at import, so the Flask embedding server starts without a key. A missing key or an OpenRouter error (invalid key, unknown model, rate limit) raises a `RuntimeError` with a readable message.
+- `requirements.txt`: removed `anthropic`, added `python-dotenv`; `requests` is now listed under the chatbot packages.
+- Collection creation uses `vector_config=[Configure.Vectors.text2vec_transformers(...)]` instead of the deprecated `vectorizer_config` / `Configure.NamedVectors`.
+- `chatbot/` (the Weaviate database, rebuilt by the notebook) is now in `.gitignore` and no longer tracked by git. Local files are kept.
+- `main_project.ipynb`: saved outputs from an old Windows run were cleared (they contained an outdated error and a local file path).
+- Rate limits on free models: a 429 response is retried up to 3 times (waiting 5s, 10s, 20s). If it still fails, the error includes the provider's own reason (`metadata.raw`) and a hint to wait or change `LLM_MODEL`.
 
 ## [2.1.0] - 2026-10-13
 
